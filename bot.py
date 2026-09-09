@@ -14,7 +14,7 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 
 MODELS = {
     "fast": "qwen2.5:3b",
-    "smart": "qwen2.5:14b",
+    "smart": "qwen2.5:7b",
 }
 DEFAULT_MODEL_PREF = "smart"
 
@@ -224,6 +224,19 @@ def query_ollama(prompt, model):
     return response.json()["response"].strip()
 
 
+def query_ollama_safe(prompt, preferred_model):
+    """Try the preferred model; if it fails (e.g. OOM-killed), fall back to the fast model."""
+    try:
+        return query_ollama(prompt, preferred_model), preferred_model
+    except Exception:
+        if preferred_model != MODELS["fast"]:
+            try:
+                return query_ollama(prompt, MODELS["fast"]), MODELS["fast"]
+            except Exception as e:
+                raise e
+        raise
+
+
 def run_shell(command, timeout=30):
     try:
         result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
@@ -292,7 +305,9 @@ async def do_ai_reply(ctx, user_id, question, use_web=False):
     async with ctx.typing():
         loop = asyncio.get_event_loop()
         try:
-            answer = await loop.run_in_executor(None, query_ollama, prompt, model)
+            answer, used_model = await loop.run_in_executor(None, query_ollama_safe, prompt, model)
+            if used_model != model:
+                answer = f"_(smart model unavailable right now, used fast model instead)_\n\n{answer}"
         except Exception as e:
             await ctx.send(f"Error talking to the local model: {e}")
             return
