@@ -199,6 +199,35 @@ def log_audit(user_id, command, output):
 init_db()
 
 
+# ================= EMBED HELPERS =================
+COLOR_INFO = 0x5865F2      # blurple
+COLOR_SUCCESS = 0x57F287   # green
+COLOR_ERROR = 0xED4245     # red
+COLOR_ECONOMY = 0xFEE75C   # gold
+COLOR_AI = 0x9B59B6        # purple
+COLOR_ADMIN = 0x2F3136     # dark grey
+
+
+def make_embed(title=None, description=None, color=COLOR_INFO, fields=None, footer=None, thumbnail=None):
+    embed = discord.Embed(title=title, description=description, color=color)
+    if fields:
+        for name, value, inline in fields:
+            embed.add_field(name=name, value=value, inline=inline)
+    if footer:
+        embed.set_footer(text=footer)
+    if thumbnail:
+        embed.set_thumbnail(url=thumbnail)
+    return embed
+
+
+def error_embed(text):
+    return make_embed(title="⚠️ Error", description=text, color=COLOR_ERROR)
+
+
+def success_embed(text, title="✅ Success"):
+    return make_embed(title=title, description=text, color=COLOR_SUCCESS)
+
+
 # ================= HELPERS =================
 def is_admin_id(user_id):
     return user_id in ADMIN_IDS
@@ -284,10 +313,10 @@ async def do_ai_reply(ctx, user_id, question, use_web=False):
     limit = PLANS[user["plan"]]["limit"]
 
     if user["messages_today"] >= limit:
-        await ctx.send(
-            f"You've hit your daily limit ({limit} messages on the **{user['plan']}** plan). "
+        await ctx.send(embed=error_embed(
+            f"You've hit your daily limit (**{limit}** messages on the **{user['plan']}** plan).\n"
             f"Use `!plans` to see upgrades, or come back tomorrow."
-        )
+        ))
         return
 
     personality = get_setting("personality", DEFAULT_PERSONALITY)
@@ -307,9 +336,9 @@ async def do_ai_reply(ctx, user_id, question, use_web=False):
         try:
             answer, used_model = await loop.run_in_executor(None, query_ollama_safe, prompt, model)
             if used_model != model:
-                answer = f"_(smart model unavailable right now, used fast model instead)_\n\n{answer}"
+                answer = f"*(smart model unavailable right now, used fast model instead)*\n\n{answer}"
         except Exception as e:
-            await ctx.send(f"Error talking to the local model: {e}")
+            await ctx.send(embed=error_embed(f"Error talking to the local model: {e}"))
             return
 
     add_memory(user_id, "user", question)
@@ -318,7 +347,9 @@ async def do_ai_reply(ctx, user_id, question, use_web=False):
                 total_messages_ai=user["total_messages_ai"] + 1)
 
     for chunk in split_message(answer):
-        await ctx.send(chunk)
+        embed = make_embed(description=chunk, color=COLOR_AI)
+        embed.set_footer(text=f"{'🌐 web' if use_web else ''} {model}".strip())
+        await ctx.send(embed=embed)
 
 
 # ================= EVENTS =================
@@ -360,19 +391,19 @@ async def web(ctx, *, question):
 @bot.command()
 async def reset(ctx):
     clear_memory(ctx.author.id)
-    await ctx.send("Your conversation memory has been cleared.")
+    await ctx.send(embed=success_embed("Your conversation memory has been cleared."))
 
 
 @bot.command(name="fast")
 async def set_fast(ctx):
     update_user(ctx.author.id, model_pref="fast")
-    await ctx.send(f"Switched to fast mode (`{MODELS['fast']}`).")
+    await ctx.send(embed=success_embed(f"Switched to **fast** mode (`{MODELS['fast']}`)."))
 
 
 @bot.command(name="smart")
 async def set_smart(ctx):
     update_user(ctx.author.id, model_pref="smart")
-    await ctx.send(f"Switched to smart mode (`{MODELS['smart']}`).")
+    await ctx.send(embed=success_embed(f"Switched to **smart** mode (`{MODELS['smart']}`)."))
 
 
 @bot.command()
@@ -380,7 +411,7 @@ async def setpersonality(ctx, *, text):
     if not is_admin_id(ctx.author.id):
         return
     set_setting("personality", text)
-    await ctx.send("Personality updated.")
+    await ctx.send(embed=success_embed("Personality updated."))
 
 
 # ================= ECONOMY: INFO =================
@@ -390,41 +421,46 @@ async def balance(ctx):
     user = ensure_daily_reset(user)
     limit = PLANS[user["plan"]]["limit"]
     limit_str = "unlimited" if limit >= 999999 else str(limit)
-    await ctx.send(
-        f"**{ctx.author.display_name}**\n"
-        f"Coins: {user['coins']}\n"
-        f"Plan: {user['plan']}\n"
-        f"AI messages today: {user['messages_today']}/{limit_str}"
+    embed = make_embed(
+        title=f"💰 {ctx.author.display_name}'s Balance",
+        color=COLOR_ECONOMY,
+        fields=[
+            ("Coins", str(user["coins"]), True),
+            ("Plan", user["plan"].capitalize(), True),
+            ("AI messages today", f"{user['messages_today']}/{limit_str}", True),
+        ],
+        thumbnail=ctx.author.display_avatar.url,
     )
+    await ctx.send(embed=embed)
 
 
 @bot.command()
 async def plans(ctx):
-    lines = ["**Available plans:**"]
+    embed = make_embed(title="📋 Available Plans", color=COLOR_ECONOMY)
     for name, info in PLANS.items():
         limit_str = "unlimited" if info["limit"] >= 999999 else f"{info['limit']}/day"
         price_str = "free" if info["price"] == 0 else f"{info['price']} coins"
-        lines.append(f"- **{name}** — {limit_str} AI messages — {price_str}")
-    lines.append("\nBuy with `!buy <plan>`")
-    await ctx.send("\n".join(lines))
+        embed.add_field(name=name.capitalize(), value=f"{limit_str} AI messages\n{price_str}", inline=True)
+    embed.set_footer(text="Buy with !buy <plan>")
+    await ctx.send(embed=embed)
 
 
 @bot.command()
 async def buy(ctx, plan_name: str):
     plan_name = plan_name.lower()
     if plan_name not in PLANS:
-        await ctx.send("Unknown plan. Use `!plans` to see options.")
+        await ctx.send(embed=error_embed("Unknown plan. Use `!plans` to see options."))
         return
     user = get_user(ctx.author.id)
     price = PLANS[plan_name]["price"]
     if user["plan"] == plan_name:
-        await ctx.send(f"You already have the **{plan_name}** plan.")
+        await ctx.send(embed=error_embed(f"You already have the **{plan_name}** plan."))
         return
     if user["coins"] < price:
-        await ctx.send(f"Not enough coins. You have {user['coins']}, need {price}.")
+        await ctx.send(embed=error_embed(f"Not enough coins. You have {user['coins']}, need {price}."))
         return
     update_user(ctx.author.id, coins=user["coins"] - price, plan=plan_name)
-    await ctx.send(f"Upgraded to **{plan_name}**! -{price} coins.")
+    await ctx.send(embed=success_embed(f"Upgraded to **{plan_name}**! -{price} coins.", title="⬆️ Plan Upgraded"))
 
 
 @bot.command()
@@ -435,15 +471,18 @@ async def leaderboard(ctx):
     rows = c.fetchall()
     conn.close()
 
-    lines = ["**Top coin holders:**"]
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
     for i, row in enumerate(rows, 1):
         try:
             member = await ctx.guild.fetch_member(int(row["user_id"])) if ctx.guild else None
             name = member.display_name if member else f"User {row['user_id']}"
         except Exception:
             name = f"User {row['user_id']}"
-        lines.append(f"{i}. {name} — {row['coins']} coins")
-    await ctx.send("\n".join(lines))
+        prefix = medals[i - 1] if i <= 3 else f"{i}."
+        lines.append(f"{prefix} **{name}** — {row['coins']} coins")
+    embed = make_embed(title="🏆 Top Coin Holders", description="\n".join(lines) or "No data yet.", color=COLOR_ECONOMY)
+    await ctx.send(embed=embed)
 
 
 # ================= ECONOMY: EARNING =================
@@ -465,11 +504,11 @@ async def daily(ctx):
     if not ok:
         hrs = wait // 3600
         mins = (wait % 3600) // 60
-        await ctx.send(f"Already claimed. Try again in {hrs}h {mins}m.")
+        await ctx.send(embed=error_embed(f"Already claimed. Try again in {hrs}h {mins}m."))
         return
     amount = random.randint(15, 40)
     update_user(ctx.author.id, coins=user["coins"] + amount, last_daily=now_ts())
-    await ctx.send(f"You claimed your daily reward: +{amount} coins!")
+    await ctx.send(embed=success_embed(f"+{amount} coins!", title="🎁 Daily Reward"))
 
 
 @bot.command()
@@ -478,12 +517,12 @@ async def work(ctx):
     ok, wait = check_cooldown(user, "last_work", 30 * 60)
     if not ok:
         mins = wait // 60
-        await ctx.send(f"You're tired. Rest {mins}m before working again.")
+        await ctx.send(embed=error_embed(f"You're tired. Rest {mins}m before working again."))
         return
     amount = random.randint(5, 20)
     update_user(ctx.author.id, coins=user["coins"] + amount, last_work=now_ts())
     jobs = ["delivered packages", "fixed a server", "walked some dogs", "sold lemonade", "mowed a lawn"]
-    await ctx.send(f"You {random.choice(jobs)} and earned {amount} coins!")
+    await ctx.send(embed=success_embed(f"You {random.choice(jobs)} and earned +{amount} coins!", title="💼 Work"))
 
 
 @bot.command()
@@ -492,15 +531,15 @@ async def beg(ctx):
     ok, wait = check_cooldown(user, "last_beg", 15 * 60)
     if not ok:
         mins = wait // 60
-        await ctx.send(f"People are tired of you. Wait {mins}m.")
+        await ctx.send(embed=error_embed(f"People are tired of you. Wait {mins}m."))
         return
     if random.random() < 0.3:
         update_user(ctx.author.id, last_beg=now_ts())
-        await ctx.send("Nobody gave you anything. 😔")
+        await ctx.send(embed=make_embed(title="🙏 Beg", description="Nobody gave you anything. 😔", color=COLOR_ERROR))
         return
     amount = random.randint(1, 8)
     update_user(ctx.author.id, coins=user["coins"] + amount, last_beg=now_ts())
-    await ctx.send(f"A stranger felt bad for you and gave you {amount} coins.")
+    await ctx.send(embed=success_embed(f"A stranger felt bad for you and gave you +{amount} coins.", title="🙏 Beg"))
 
 
 # ================= ECONOMY: GAMES =================
@@ -508,21 +547,21 @@ async def beg(ctx):
 async def coinflip(ctx, amount: int):
     user = get_user(ctx.author.id)
     if amount <= 0 or amount > user["coins"]:
-        await ctx.send("Invalid bet amount.")
+        await ctx.send(embed=error_embed("Invalid bet amount."))
         return
     if random.random() < 0.5:
         update_user(ctx.author.id, coins=user["coins"] + amount)
-        await ctx.send(f"🪙 Heads! You won {amount} coins.")
+        await ctx.send(embed=success_embed(f"🪙 Heads! You won +{amount} coins.", title="Coin Flip"))
     else:
         update_user(ctx.author.id, coins=user["coins"] - amount)
-        await ctx.send(f"🪙 Tails! You lost {amount} coins.")
+        await ctx.send(embed=make_embed(title="Coin Flip", description=f"🪙 Tails! You lost -{amount} coins.", color=COLOR_ERROR))
 
 
 @bot.command()
 async def slots(ctx, amount: int):
     user = get_user(ctx.author.id)
     if amount <= 0 or amount > user["coins"]:
-        await ctx.send("Invalid bet amount.")
+        await ctx.send(embed=error_embed("Invalid bet amount."))
         return
 
     symbols = ["🍒", "🍋", "🍇", "💎", "⭐"]
@@ -532,46 +571,46 @@ async def slots(ctx, amount: int):
     if spin[0] == spin[1] == spin[2]:
         winnings = amount * 5
         update_user(ctx.author.id, coins=user["coins"] + winnings)
-        await ctx.send(f"{display}\nJACKPOT! You won {winnings} coins!")
+        await ctx.send(embed=success_embed(f"{display}\n**JACKPOT!** You won +{winnings} coins!", title="🎰 Slots"))
     elif len(set(spin)) == 2:
         winnings = amount
         update_user(ctx.author.id, coins=user["coins"] + winnings)
-        await ctx.send(f"{display}\nSmall win! +{winnings} coins.")
+        await ctx.send(embed=success_embed(f"{display}\nSmall win! +{winnings} coins.", title="🎰 Slots"))
     else:
         update_user(ctx.author.id, coins=user["coins"] - amount)
-        await ctx.send(f"{display}\nNo match. -{amount} coins.")
+        await ctx.send(embed=make_embed(title="🎰 Slots", description=f"{display}\nNo match. -{amount} coins.", color=COLOR_ERROR))
 
 
 @bot.command()
 async def give(ctx, member: discord.Member, amount: int):
     if amount <= 0:
-        await ctx.send("Invalid amount.")
+        await ctx.send(embed=error_embed("Invalid amount."))
         return
     sender = get_user(ctx.author.id)
     if sender["coins"] < amount:
-        await ctx.send("You don't have that many coins.")
+        await ctx.send(embed=error_embed("You don't have that many coins."))
         return
     receiver = get_user(member.id)
     update_user(ctx.author.id, coins=sender["coins"] - amount)
     update_user(member.id, coins=receiver["coins"] + amount)
-    await ctx.send(f"{ctx.author.display_name} gave {amount} coins to {member.display_name}.")
+    await ctx.send(embed=success_embed(f"{ctx.author.display_name} gave **{amount}** coins to {member.display_name}.", title="🤝 Gift"))
 
 
 @bot.command()
 async def rob(ctx, member: discord.Member):
     if member.id == ctx.author.id:
-        await ctx.send("You can't rob yourself.")
+        await ctx.send(embed=error_embed("You can't rob yourself."))
         return
     robber = get_user(ctx.author.id)
     ok, wait = check_cooldown(robber, "last_rob", 60 * 60)
     if not ok:
         mins = wait // 60
-        await ctx.send(f"Lay low for {mins}m before robbing again.")
+        await ctx.send(embed=error_embed(f"Lay low for {mins}m before robbing again."))
         return
 
     target = get_user(member.id)
     if target["coins"] < 10:
-        await ctx.send(f"{member.display_name} has nothing worth stealing.")
+        await ctx.send(embed=error_embed(f"{member.display_name} has nothing worth stealing."))
         update_user(ctx.author.id, last_rob=now_ts())
         return
 
@@ -579,11 +618,11 @@ async def rob(ctx, member: discord.Member):
         stolen = random.randint(1, min(target["coins"], 50))
         update_user(ctx.author.id, coins=robber["coins"] + stolen, last_rob=now_ts())
         update_user(member.id, coins=target["coins"] - stolen)
-        await ctx.send(f"You robbed {member.display_name} and got away with {stolen} coins!")
+        await ctx.send(embed=success_embed(f"You robbed {member.display_name} and got away with +{stolen} coins!", title="🦹 Robbery"))
     else:
         penalty = min(robber["coins"], random.randint(5, 30))
         update_user(ctx.author.id, coins=robber["coins"] - penalty, last_rob=now_ts())
-        await ctx.send(f"You got caught robbing {member.display_name} and paid a {penalty} coin fine.")
+        await ctx.send(embed=make_embed(title="🚨 Caught!", description=f"You got caught robbing {member.display_name} and paid a -{penalty} coin fine.", color=COLOR_ERROR))
 
 
 # ================= ADMIN: ECONOMY MANAGEMENT =================
@@ -593,7 +632,7 @@ async def addcoins(ctx, member: discord.Member, amount: int):
         return
     target = get_user(member.id)
     update_user(member.id, coins=target["coins"] + amount)
-    await ctx.send(f"Gave {amount} coins to {member.display_name}.")
+    await ctx.send(embed=success_embed(f"Gave **{amount}** coins to {member.display_name}."))
 
 
 # ================= ADMIN: SYSTEM ACCESS =================
@@ -602,14 +641,15 @@ async def sys(ctx, *, command):
     if not is_admin_id(ctx.author.id):
         return
     if not is_dm(ctx):
-        await ctx.send("This command only works in DMs.")
+        await ctx.send(embed=error_embed("This command only works in DMs."))
         return
     async with ctx.typing():
         loop = asyncio.get_event_loop()
         output = await loop.run_in_executor(None, run_shell, command)
     log_audit(ctx.author.id, f"!sys {command}", output)
-    for chunk in split_message(f"```\n{output}\n```"):
-        await ctx.send(chunk)
+    for chunk in split_message(output):
+        embed = make_embed(title=f"🖥️ `{command[:50]}`", description=f"```\n{chunk}\n```", color=COLOR_ADMIN)
+        await ctx.send(embed=embed)
 
 
 AI_SYS_PROMPT = (
@@ -639,9 +679,12 @@ async def aisys(ctx, *, request):
             return
 
     command = command.strip().strip("`").strip()
-    confirm_msg = await ctx.send(
-        f"Proposed command:\n```\n{command}\n```\nReact ✅ to run, ❌ to cancel. (30s)"
+    confirm_embed = make_embed(
+        title="🤖 Proposed Command",
+        description=f"```\n{command}\n```\nReact ✅ to run, ❌ to cancel. (30s)",
+        color=COLOR_ADMIN,
     )
+    confirm_msg = await ctx.send(embed=confirm_embed)
     await confirm_msg.add_reaction("✅")
     await confirm_msg.add_reaction("❌")
     pending_commands[confirm_msg.id] = command
@@ -656,21 +699,22 @@ async def aisys(ctx, *, request):
     try:
         reaction, _ = await bot.wait_for("reaction_add", timeout=30.0, check=check)
     except asyncio.TimeoutError:
-        await ctx.send("Timed out. Command not run.")
+        await ctx.send(embed=error_embed("Timed out. Command not run."))
         pending_commands.pop(confirm_msg.id, None)
         return
 
     cmd = pending_commands.pop(confirm_msg.id, None)
     if str(reaction.emoji) == "❌" or cmd is None:
-        await ctx.send("Cancelled.")
+        await ctx.send(embed=error_embed("Cancelled."))
         return
 
     async with ctx.typing():
         loop = asyncio.get_event_loop()
         output = await loop.run_in_executor(None, run_shell, cmd)
     log_audit(ctx.author.id, f"!aisys {request} -> {cmd}", output)
-    for chunk in split_message(f"```\n{output}\n```"):
-        await ctx.send(chunk)
+    for chunk in split_message(output):
+        embed = make_embed(title=f"🖥️ `{cmd[:50]}`", description=f"```\n{chunk}\n```", color=COLOR_ADMIN)
+        await ctx.send(embed=embed)
 
 
 @bot.command()
@@ -681,8 +725,9 @@ async def status(ctx):
     output = await loop.run_in_executor(
         None, run_shell, "echo CPU:; nproc; echo; free -h; echo; df -h /"
     )
-    for chunk in split_message(f"```\n{output}\n```"):
-        await ctx.send(chunk)
+    for chunk in split_message(output):
+        embed = make_embed(title="📊 System Status", description=f"```\n{chunk}\n```", color=COLOR_ADMIN)
+        await ctx.send(embed=embed)
 
 
 @bot.command()
@@ -695,13 +740,14 @@ async def auditlog(ctx, count: int = 10):
     rows = c.fetchall()
     conn.close()
     if not rows:
-        await ctx.send("No audit log entries yet.")
+        await ctx.send(embed=make_embed(title="📜 Audit Log", description="No entries yet.", color=COLOR_ADMIN))
         return
     lines = []
     for r in rows:
         lines.append(f"[{r['ts']}] user={r['user_id']} cmd={r['command']!r} -> {r['output'][:200]}")
     for chunk in split_message("\n".join(lines)):
-        await ctx.send(f"```\n{chunk}\n```")
+        embed = make_embed(title="📜 Audit Log", description=f"```\n{chunk}\n```", color=COLOR_ADMIN)
+        await ctx.send(embed=embed)
 
 
 # ================= SHOP =================
@@ -727,27 +773,27 @@ def add_to_inventory(user_id, item_name):
 
 @bot.command()
 async def shop(ctx):
-    lines = ["**Shop:**"]
+    embed = make_embed(title="🛒 Shop", color=COLOR_ECONOMY)
     for name, info in SHOP_ITEMS.items():
-        lines.append(f"- **{name}** — {info['price']} coins — {info['description']}")
-    lines.append("\nBuy with `!buyitem <name>`")
-    await ctx.send("\n".join(lines))
+        embed.add_field(name=f"{name} — {info['price']} coins", value=info["description"], inline=False)
+    embed.set_footer(text="Buy with !buyitem <name>")
+    await ctx.send(embed=embed)
 
 
 @bot.command()
 async def buyitem(ctx, item_name: str):
     item_name = item_name.lower()
     if item_name not in SHOP_ITEMS:
-        await ctx.send("Item not found. Check `!shop`.")
+        await ctx.send(embed=error_embed("Item not found. Check `!shop`."))
         return
     user = get_user(ctx.author.id)
     price = SHOP_ITEMS[item_name]["price"]
     if user["coins"] < price:
-        await ctx.send(f"Not enough coins. You have {user['coins']}, need {price}.")
+        await ctx.send(embed=error_embed(f"Not enough coins. You have {user['coins']}, need {price}."))
         return
     update_user(ctx.author.id, coins=user["coins"] - price)
     add_to_inventory(ctx.author.id, item_name)
-    await ctx.send(f"Bought **{item_name}** for {price} coins!")
+    await ctx.send(embed=success_embed(f"Bought **{item_name}** for {price} coins!", title="🛍️ Purchased"))
 
 
 @bot.command()
@@ -758,10 +804,10 @@ async def inventory(ctx):
     rows = c.fetchall()
     conn.close()
     if not rows:
-        await ctx.send("Your inventory is empty. Check `!shop`.")
+        await ctx.send(embed=make_embed(title="🎒 Inventory", description="Empty. Check `!shop`.", color=COLOR_ECONOMY))
         return
-    lines = [f"- {r['item_name']} x{r['qty']}" for r in rows]
-    await ctx.send("**Your inventory:**\n" + "\n".join(lines))
+    lines = "\n".join(f"- {r['item_name']} x{r['qty']}" for r in rows)
+    await ctx.send(embed=make_embed(title=f"🎒 {ctx.author.display_name}'s Inventory", description=lines, color=COLOR_ECONOMY))
 
 
 # ================= MORE GAMES =================
