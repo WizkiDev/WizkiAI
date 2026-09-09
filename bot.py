@@ -310,6 +310,10 @@ async def do_ai_reply(ctx, user_id, question, use_web=False):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+    if not reminder_checker.is_running():
+        reminder_checker.start()
+    if not daily_interest.is_running():
+        daily_interest.start()
 
 
 @bot.event
@@ -985,10 +989,6 @@ async def daily_interest():
 @daily_interest.before_loop
 async def before_loops():
     await bot.wait_until_ready()
-
-
-reminder_checker.start()
-daily_interest.start()
 
 
 # ================= HELP =================
